@@ -2,43 +2,68 @@ import { useState, useEffect, useMemo } from 'react';
 import { Plus, Shield, Search, WalletCards } from 'lucide-react';
 import { PasswordCard } from './components/PasswordCard';
 import { AddPasswordModal, PasswordData, getRandomGradient } from './components/AddPasswordModal';
+import AuthScreen from './components/AuthScreen';
 
-function App() {
+// --- FIREBASE IMPORTS ADDED ---
+import { db, auth } from './firebase'; 
+import { collection, addDoc, deleteDoc, doc, onSnapshot, query, where } from 'firebase/firestore';
+
+// We rename your original App to VaultApp so it only runs AFTER unlocking
+function VaultApp() {
   const [passwords, setPasswords] = useState<PasswordData[]>([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Load from local storage on mount
+  // --- UPGRADED: Load from Firebase instead of Local Storage ---
   useEffect(() => {
-    const saved = localStorage.getItem('vaultify-passwords');
-    if (saved) {
-      try {
-        setPasswords(JSON.parse(saved));
-      } catch (e) {
-        console.error('Failed to parse passwords from local storage');
-      }
-    }
+    const user = auth.currentUser;
+    if (!user) return;
+
+    // Only fetch passwords that belong to the logged-in user
+    const q = query(collection(db, 'passwords'), where('userId', '==', user.uid));
+    
+    // onSnapshot listens for real-time updates from Firebase
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const loadedPasswords: PasswordData[] = [];
+      snapshot.forEach((doc) => {
+        loadedPasswords.push({ id: doc.id, ...doc.data() } as PasswordData);
+      });
+      // Sort so newest are at the top
+      setPasswords(loadedPasswords.sort((a, b) => b.dateAdded.localeCompare(a.dateAdded)));
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  // Save to local storage whenever passwords change
-  useEffect(() => {
-    localStorage.setItem('vaultify-passwords', JSON.stringify(passwords));
-  }, [passwords]);
+  // --- UPGRADED: Save to Firebase instead of Local Storage ---
+  const handleAddPassword = async (data: Omit<PasswordData, 'id' | 'dateAdded' | 'gradient'>) => {
+    const user = auth.currentUser;
+    if (!user) return;
 
-  const handleAddPassword = (data: Omit<PasswordData, 'id' | 'dateAdded' | 'gradient'>) => {
-    const newPassword: PasswordData = {
+    const newPassword = {
       ...data,
-      id: crypto.randomUUID(),
       dateAdded: new Date().toLocaleDateString('en-US', { month: '2-digit', year: '2-digit' }), // MM/YY
       gradient: getRandomGradient(),
+      userId: user.uid // Securely attach this password to the logged-in user
     };
     
-    setPasswords((prev) => [newPassword, ...prev]);
+    try {
+      // Add to Firestore database (React state updates automatically via onSnapshot)
+      await addDoc(collection(db, 'passwords'), newPassword);
+    } catch (error) {
+      console.error("Error adding password: ", error);
+      alert("Failed to save password to cloud.");
+    }
   };
 
-  const handleDeletePassword = (id: string) => {
+  // --- UPGRADED: Delete from Firebase ---
+  const handleDeletePassword = async (id: string) => {
     if (window.confirm('Are you sure you want to delete this password?')) {
-      setPasswords((prev) => prev.filter((p) => p.id !== id));
+      try {
+        await deleteDoc(doc(db, 'passwords', id));
+      } catch (error) {
+        console.error("Error deleting password: ", error);
+      }
     }
   };
 
@@ -169,4 +194,11 @@ function App() {
   );
 }
 
-export default App;
+// THIS IS THE MAIN APP COMPONENT THAT WRAPS EVERYTHING IN THE AUTH SCREEN
+export default function App() {
+  return (
+    <AuthScreen>
+      <VaultApp />
+    </AuthScreen>
+  );
+}
